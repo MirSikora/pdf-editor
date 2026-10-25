@@ -1,0 +1,69 @@
+:root {
+  --text: #3a3a42;
+  --text-h: #111116;
+  --bg: #f4f5f7;
+  --panel-bg: #ffffff;
+  --border: #e0e1e6;
+  --accent: #6d28d9;
+  --accent-contrast: #ffffff;
+  --danger: #dc2626;
+  --shadow: rgba(0, 0, 0, 0.12) 0 10px 25px -5px, rgba(0, 0, 0, 0.08) 0 4px 6px -2px;
+
+  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
+
+  font: 15px/1.45 var(--sans);
+  color-scheme: light dark;
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #c9cad1;
+    --text-h: #f3f4f6;
+    --bg: #15161b;
+    --panel-bg: #1e2027;
+    --border: #2e303a;
+    --accent: #a78bfa;
+    --accent-contrast: #15161b;
+    --danger: #f87171;
+    --shadow: rgba(0, 0, 0, 0.5) 0 10px 25px -5px, rgba(0, 0, 0, 0.3) 0 4px 6px -2px;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--sans);
+  font-weight: 600;
+  color: var(--text-h);
+  margin: 0 0 8px;
+}
+
+button {
+  font: inherit;
+}
+
+input,
+select {
+  font: inherit;
+}
