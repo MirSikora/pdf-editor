@@ -1,6 +1,7 @@
 import { PDFDocument, rgb, degrees } from 'pdf-lib'
-import type { PDFFont } from 'pdf-lib'
+import type { PDFFont, PDFImage } from 'pdf-lib'
 import fontkit from '@pdf-lib/fontkit'
+import type { Annotation } from '../types/annotations'
 
 export type RgbColor = { r: number; g: number; b: number }
 
@@ -156,6 +157,67 @@ export async function addHighlight(
     color: rgb(color.r, color.g, color.b),
     opacity,
   })
+  return save(doc)
+}
+
+// Bakes a batch of editable text/image annotations (see src/types/annotations.ts)
+// into the actual PDF content: a white rectangle behind each annotation that
+// opted in (used to "white out" existing text/images before replacing them),
+// then the text or image itself. This is the only way to change PDF content —
+// there's no way to edit the original content stream in place, so "editing"
+// existing text/images means covering them and drawing new content on top.
+export async function applyAnnotations(bytes: Uint8Array, annotations: Annotation[]): Promise<Uint8Array> {
+  if (annotations.length === 0) return bytes
+  const doc = await load(bytes)
+  const font = await embedUnicodeFont(doc)
+  const imageCache = new Map<string, PDFImage>()
+
+  for (const ann of annotations) {
+    const page = doc.getPage(ann.pageIndex)
+
+    if (ann.type === 'text') {
+      const textHeight = ann.fontSize * 1.2
+      if (ann.background) {
+        const autoWidth = font.widthOfTextAtSize(ann.text || ' ', ann.fontSize) + 4
+        page.drawRectangle({
+          x: ann.x - (ann.coverWidth ? 0 : 2),
+          y: ann.y - (ann.coverHeight ?? textHeight),
+          width: ann.coverWidth ?? autoWidth,
+          height: ann.coverHeight ?? textHeight,
+          color: rgb(1, 1, 1),
+        })
+      }
+      page.drawText(ann.text, {
+        x: ann.x,
+        y: ann.y - ann.fontSize * 0.8,
+        size: ann.fontSize,
+        font,
+        color: rgb(ann.color.r, ann.color.g, ann.color.b),
+      })
+    } else {
+      if (ann.background) {
+        page.drawRectangle({
+          x: ann.x,
+          y: ann.y - ann.height,
+          width: ann.width,
+          height: ann.height,
+          color: rgb(1, 1, 1),
+        })
+      }
+      let embedded = imageCache.get(ann.id)
+      if (!embedded) {
+        embedded = ann.mime === 'image/png' ? await doc.embedPng(ann.bytes) : await doc.embedJpg(ann.bytes)
+        imageCache.set(ann.id, embedded)
+      }
+      page.drawImage(embedded, {
+        x: ann.x,
+        y: ann.y - ann.height,
+        width: ann.width,
+        height: ann.height,
+      })
+    }
+  }
+
   return save(doc)
 }
 

@@ -54,8 +54,23 @@ export function Toolbar({
             <button
               className={`btn ${tool === 'text' ? 'btn-active' : ''}`}
               onClick={() => onSetTool(tool === 'text' ? 'none' : 'text')}
+              title="Vložit nový text"
             >
               🔤 Text
+            </button>
+            <button
+              className={`btn ${tool === 'edit-text' ? 'btn-active' : ''}`}
+              onClick={() => onSetTool(tool === 'edit-text' ? 'none' : 'edit-text')}
+              title="Nahradit existující text"
+            >
+              ✏️ Upravit text
+            </button>
+            <button
+              className={`btn ${tool === 'image' ? 'btn-active' : ''}`}
+              onClick={() => onSetTool(tool === 'image' ? 'none' : 'image')}
+              title="Vložit nebo nahradit obrázek"
+            >
+              🖼 Obrázek
             </button>
             <button
               className={`btn ${tool === 'highlight' ? 'btn-active' : ''}`}

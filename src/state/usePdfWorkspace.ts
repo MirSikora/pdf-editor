@@ -1,12 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { openPdfJs } from '../lib/pdfRender'
 import * as engine from '../lib/pdfEngine'
-import type { FormFieldInfo, RgbColor, TextOptions, WatermarkOptions } from '../lib/pdfEngine'
+import type { FormFieldInfo, RgbColor, WatermarkOptions } from '../lib/pdfEngine'
+import type { Annotation } from '../types/annotations'
 
 async function fileToBytes(file: File): Promise<Uint8Array> {
   const buf = await file.arrayBuffer()
   return new Uint8Array(buf)
+}
+
+function revokeAnnotationUrls(annotations: Annotation[]) {
+  for (const a of annotations) {
+    if (a.type === 'image') URL.revokeObjectURL(a.previewUrl)
+  }
 }
 
 export function usePdfWorkspace() {
@@ -24,7 +31,8 @@ export function usePdfWorkspace() {
 
   const [formFields, setFormFields] = useState<FormFieldInfo[]>([])
 
-  const revBytes = useRef(0)
+  const [annotations, setAnnotations] = useState<Annotation[]>([])
+  const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -34,7 +42,6 @@ export function usePdfWorkspace() {
       setFormFields([])
       return
     }
-    revBytes.current += 1
     setLoading(true)
     setError(null)
     openPdfJs(bytes)
@@ -63,23 +70,38 @@ export function usePdfWorkspace() {
     }
   }, [bytes])
 
-  const commit = useCallback(
-    (newBytes: Uint8Array) => {
-      setBytes((current) => {
-        if (current) setPast((p) => [...p, current])
-        return newBytes
-      })
-      setFuture([])
+  const commit = useCallback((newBytes: Uint8Array) => {
+    setBytes((current) => {
+      if (current) setPast((p) => [...p, current])
+      return newBytes
+    })
+    setFuture([])
+  }, [])
+
+  // Bakes any pending (not-yet-saved) text/image annotations into `base` and
+  // clears the pending layer. Every operation that reads from `bytes` must go
+  // through this first, otherwise pending annotations would silently vanish
+  // (or, worse, end up pointing at the wrong page after a rotate/delete/reorder).
+  const bakeAnnotationsIfAny = useCallback(
+    async (base: Uint8Array): Promise<Uint8Array> => {
+      if (annotations.length === 0) return base
+      const result = await engine.applyAnnotations(base, annotations)
+      revokeAnnotationUrls(annotations)
+      setAnnotations([])
+      setSelectedAnnotationId(null)
+      return result
     },
-    [],
+    [annotations],
   )
 
   const runEdit = useCallback(
-    async (fn: () => Promise<Uint8Array>) => {
+    async (fn: (base: Uint8Array) => Promise<Uint8Array>) => {
+      if (!bytes) return
       setLoading(true)
       setError(null)
       try {
-        const result = await fn()
+        const baked = await bakeAnnotationsIfAny(bytes)
+        const result = await fn(baked)
         commit(result)
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Operace se nezdařila')
@@ -87,37 +109,39 @@ export function usePdfWorkspace() {
         setLoading(false)
       }
     },
-    [commit],
+    [bytes, bakeAnnotationsIfAny, commit],
   )
 
-  const openFiles = useCallback(
-    async (files: File[]) => {
-      if (files.length === 0) return
-      setLoading(true)
-      setError(null)
-      try {
-        const buffers = await Promise.all(files.map(fileToBytes))
-        const merged = buffers.length === 1 ? buffers[0] : await engine.mergePdfs(buffers)
-        setFileName(files.length === 1 ? files[0].name : 'sloučený-dokument.pdf')
-        setPast([])
-        setFuture([])
-        setBytes(merged)
-        setSelectedPage(0)
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Nepodařilo se načíst PDF')
-      } finally {
-        setLoading(false)
-      }
-    },
-    [],
-  )
+  const openFiles = useCallback(async (files: File[]) => {
+    if (files.length === 0) return
+    setLoading(true)
+    setError(null)
+    try {
+      const buffers = await Promise.all(files.map(fileToBytes))
+      const merged = buffers.length === 1 ? buffers[0] : await engine.mergePdfs(buffers)
+      setFileName(files.length === 1 ? files[0].name : 'sloučený-dokument.pdf')
+      setPast([])
+      setFuture([])
+      setAnnotations((prev) => {
+        revokeAnnotationUrls(prev)
+        return []
+      })
+      setSelectedAnnotationId(null)
+      setBytes(merged)
+      setSelectedPage(0)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Nepodařilo se načíst PDF')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
 
   const appendFiles = useCallback(
-    async (files: File[]) => {
+    (files: File[]) => {
       if (files.length === 0 || !bytes) return
-      await runEdit(async () => {
+      return runEdit(async (base) => {
         const buffers = await Promise.all(files.map(fileToBytes))
-        return engine.mergePdfs([bytes, ...buffers])
+        return engine.mergePdfs([base, ...buffers])
       })
     },
     [bytes, runEdit],
@@ -144,73 +168,136 @@ export function usePdfWorkspace() {
   }, [bytes])
 
   const rotateCurrentPage = useCallback(
-    (pageIndex: number, delta: number) => {
-      if (!bytes) return
-      return runEdit(() => engine.rotatePage(bytes, pageIndex, delta))
-    },
-    [bytes, runEdit],
+    (pageIndex: number, delta: number) => runEdit((base) => engine.rotatePage(base, pageIndex, delta)),
+    [runEdit],
   )
 
   const deletePageAt = useCallback(
-    (pageIndex: number) => {
-      if (!bytes) return
-      return runEdit(() => engine.deletePage(bytes, pageIndex))
-    },
-    [bytes, runEdit],
+    (pageIndex: number) => runEdit((base) => engine.deletePage(base, pageIndex)),
+    [runEdit],
   )
 
   const reorder = useCallback(
-    (newOrder: number[]) => {
-      if (!bytes) return
-      return runEdit(() => engine.reorderPages(bytes, newOrder))
-    },
-    [bytes, runEdit],
-  )
-
-  const addTextAt = useCallback(
-    (pageIndex: number, pdfX: number, pdfY: number, text: string, opts: TextOptions) => {
-      if (!bytes) return
-      return runEdit(() => engine.addText(bytes, pageIndex, pdfX, pdfY, text, opts))
-    },
-    [bytes, runEdit],
+    (newOrder: number[]) => runEdit((base) => engine.reorderPages(base, newOrder)),
+    [runEdit],
   )
 
   const addHighlightAt = useCallback(
-    (
-      pageIndex: number,
-      pdfX: number,
-      pdfY: number,
-      w: number,
-      h: number,
-      color: RgbColor,
-      opacity: number,
-    ) => {
-      if (!bytes) return
-      return runEdit(() => engine.addHighlight(bytes, pageIndex, pdfX, pdfY, w, h, color, opacity))
-    },
-    [bytes, runEdit],
+    (pageIndex: number, pdfX: number, pdfY: number, w: number, h: number, color: RgbColor, opacity: number) =>
+      runEdit((base) => engine.addHighlight(base, pageIndex, pdfX, pdfY, w, h, color, opacity)),
+    [runEdit],
   )
 
   const addWatermarkAll = useCallback(
-    (opts: WatermarkOptions) => {
-      if (!bytes) return
-      return runEdit(() => engine.addWatermark(bytes, opts))
-    },
-    [bytes, runEdit],
+    (opts: WatermarkOptions) => runEdit((base) => engine.addWatermark(base, opts)),
+    [runEdit],
   )
 
   const applyFormValues = useCallback(
-    (values: Record<string, string | boolean>, flatten: boolean) => {
-      if (!bytes) return
-      return runEdit(() => engine.fillForm(bytes, values, flatten))
-    },
-    [bytes, runEdit],
+    (values: Record<string, string | boolean>, flatten: boolean) =>
+      runEdit((base) => engine.fillForm(base, values, flatten)),
+    [runEdit],
   )
 
-  const exportCurrent = useCallback(() => {
+  // --- Editable annotation layer (new/replacement text & images) ---
+
+  const addTextAnnotation = useCallback(
+    (
+      pageIndex: number,
+      x: number,
+      y: number,
+      text: string,
+      fontSize: number,
+      color: RgbColor,
+      background: boolean,
+      cover?: { width: number; height: number },
+    ) => {
+      const id = crypto.randomUUID()
+      setAnnotations((a) => [
+        ...a,
+        {
+          id,
+          type: 'text',
+          pageIndex,
+          x,
+          y,
+          text,
+          fontSize,
+          color,
+          background,
+          coverWidth: cover?.width,
+          coverHeight: cover?.height,
+        },
+      ])
+      setSelectedAnnotationId(id)
+      return id
+    },
+    [],
+  )
+
+  const addImageAnnotation = useCallback(
+    (
+      pageIndex: number,
+      x: number,
+      y: number,
+      width: number,
+      height: number,
+      imgBytes: Uint8Array,
+      mime: 'image/png' | 'image/jpeg',
+      background: boolean,
+    ) => {
+      const id = crypto.randomUUID()
+      const previewUrl = URL.createObjectURL(new Blob([imgBytes as BlobPart], { type: mime }))
+      setAnnotations((a) => [
+        ...a,
+        { id, type: 'image', pageIndex, x, y, width, height, bytes: imgBytes, mime, previewUrl, background },
+      ])
+      setSelectedAnnotationId(id)
+      return id
+    },
+    [],
+  )
+
+  const updateAnnotation = useCallback((id: string, patch: Partial<Annotation>) => {
+    setAnnotations((list) => list.map((a) => (a.id === id ? ({ ...a, ...patch } as Annotation) : a)))
+  }, [])
+
+  const deleteAnnotation = useCallback((id: string) => {
+    setAnnotations((list) => {
+      const found = list.find((a) => a.id === id)
+      if (found) revokeAnnotationUrls([found])
+      return list.filter((a) => a.id !== id)
+    })
+    setSelectedAnnotationId((s) => (s === id ? null : s))
+  }, [])
+
+  const discardAnnotations = useCallback(() => {
+    setAnnotations((list) => {
+      revokeAnnotationUrls(list)
+      return []
+    })
+    setSelectedAnnotationId(null)
+  }, [])
+
+  const commitAnnotations = useCallback(() => {
+    if (!bytes || annotations.length === 0) return
+    return runEdit((base) => Promise.resolve(base))
+  }, [bytes, annotations.length, runEdit])
+
+  const exportCurrent = useCallback(async () => {
     if (!bytes) return
-    engine.triggerDownload(bytes, fileName.endsWith('.pdf') ? fileName : `${fileName}.pdf`)
-  }, [bytes, fileName])
+    setLoading(true)
+    setError(null)
+    try {
+      const baked = await bakeAnnotationsIfAny(bytes)
+      if (baked !== bytes) commit(baked)
+      engine.triggerDownload(baked, fileName.endsWith('.pdf') ? fileName : `${fileName}.pdf`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Stažení se nezdařilo')
+    } finally {
+      setLoading(false)
+    }
+  }, [bytes, bakeAnnotationsIfAny, commit, fileName])
 
   const splitRange = useCallback(
     async (fromIndex: number, toIndex: number) => {
@@ -218,9 +305,11 @@ export function usePdfWorkspace() {
       setLoading(true)
       setError(null)
       try {
+        const baked = await bakeAnnotationsIfAny(bytes)
+        if (baked !== bytes) commit(baked)
         const indices = []
         for (let i = fromIndex; i <= toIndex; i++) indices.push(i)
-        const extracted = await engine.extractPages(bytes, indices)
+        const extracted = await engine.extractPages(baked, indices)
         engine.triggerDownload(extracted, `${fileName.replace(/\.pdf$/i, '')}-${fromIndex + 1}-${toIndex + 1}.pdf`)
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Rozdělení se nezdařilo')
@@ -228,7 +317,7 @@ export function usePdfWorkspace() {
         setLoading(false)
       }
     },
-    [bytes, fileName],
+    [bytes, bakeAnnotationsIfAny, commit, fileName],
   )
 
   const splitEach = useCallback(async () => {
@@ -236,7 +325,9 @@ export function usePdfWorkspace() {
     setLoading(true)
     setError(null)
     try {
-      const parts = await engine.splitEachPage(bytes)
+      const baked = await bakeAnnotationsIfAny(bytes)
+      if (baked !== bytes) commit(baked)
+      const parts = await engine.splitEachPage(baked)
       const base = fileName.replace(/\.pdf$/i, '')
       parts.forEach((part, i) => {
         setTimeout(() => engine.triggerDownload(part, `${base}-strana-${i + 1}.pdf`), i * 150)
@@ -246,7 +337,7 @@ export function usePdfWorkspace() {
     } finally {
       setLoading(false)
     }
-  }, [bytes, fileName])
+  }, [bytes, bakeAnnotationsIfAny, commit, fileName])
 
   return {
     fileName,
@@ -268,13 +359,21 @@ export function usePdfWorkspace() {
     rotateCurrentPage,
     deletePageAt,
     reorder,
-    addTextAt,
     addHighlightAt,
     addWatermarkAll,
     applyFormValues,
     exportCurrent,
     splitRange,
     splitEach,
+    annotations,
+    selectedAnnotationId,
+    setSelectedAnnotationId,
+    addTextAnnotation,
+    addImageAnnotation,
+    updateAnnotation,
+    deleteAnnotation,
+    discardAnnotations,
+    commitAnnotations,
   }
 }
 
